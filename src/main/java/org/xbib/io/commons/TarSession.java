@@ -34,6 +34,7 @@ public class TarSession implements Session {
     private TarArchiveOutputStream out;
     private String scheme;
     private String part;
+    private Boolean usingTarget = false;
 
     public void setScheme(String scheme) {
         this.scheme = scheme;
@@ -46,16 +47,21 @@ public class TarSession implements Session {
     public String getName() {
         return part;
     }
+    
+    public void setUsingTarget(Boolean usingTarget){
+        this.usingTarget = usingTarget;
+    }
 
     @Override
     public synchronized void open(Mode mode) throws IOException {
         if (isOpen) {
             return;
         }
+        String s = null;
         switch (mode) {
             case READ:
                 if (scheme.startsWith("targz")) {
-                    String s = part + ".tar.gz";
+                    s = (usingTarget) ? part : part + ".tar.gz";
                     File f = new File(s);
                     if (f.isFile() && f.canRead()) {
                         this.fin = new FileInputStream(f);
@@ -65,7 +71,7 @@ public class TarSession implements Session {
                         throw new FileNotFoundException("check existence or access rights: " + s);
                     }
                 } else if (scheme.startsWith("tarbz2")) {
-                    String s = part + ".tar.bz2";
+                    s = (usingTarget) ? part : part + ".tar.bz2";
                     File f = new File(s);
                     if (f.isFile() && f.canRead()) {
                         this.fin = new FileInputStream(f);
@@ -75,7 +81,7 @@ public class TarSession implements Session {
                         throw new FileNotFoundException("check existence or access rights: " + s);
                     }
                 } else if (scheme.startsWith("tarxz")) {
-                    String s = part + ".tar.xz";
+                    s = (usingTarget) ? part : part + ".tar.xz";
                     File f = new File(s);
                     if (f.isFile() && f.canRead()) {
                         this.fin = new FileInputStream(f);
@@ -85,7 +91,7 @@ public class TarSession implements Session {
                         throw new FileNotFoundException("check existence or access rights: " + s);
                     }
                 } else {
-                    String s = part + ".tar";
+                    s = (usingTarget) ? part : part + ".tar";
                     File f = new File(s);
                     if (f.isFile() && f.canRead()) {
                         this.fin = new FileInputStream(f);

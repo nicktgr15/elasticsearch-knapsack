@@ -37,4 +37,10 @@ public interface Session<P extends Packet> extends Serializable {
      * @return true if the session is open
      */
     boolean isOpen();
+    
+    /**
+     * Specifies whether the target parameter was used on the request
+     * @param usingTarget
+     */
+    void setUsingTarget(Boolean usingTarget);
 }

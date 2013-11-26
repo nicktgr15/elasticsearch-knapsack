@@ -95,6 +95,7 @@ public class RestImportAction extends BaseRestHandler {
             ConnectionFactory factory = service.getConnectionFactory(scheme);
             final Connection<Session> connection = factory.getConnection(URI.create(scheme + ":" + target));
             final Session session = connection.createSession();
+            if(!target.equals(desc)) session.setUsingTarget(true);
             session.open(Session.Mode.READ);
             EsExecutors.daemonThreadFactory(settings, "Knapsack import [" + desc + "]")
                     .newThread(new ImportThread(request, connection, session, target)).start();
