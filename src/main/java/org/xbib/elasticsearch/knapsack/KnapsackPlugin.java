@@ -18,11 +18,13 @@
  */
 package org.xbib.elasticsearch.knapsack;
 
+import java.util.Collection;
+
 import org.elasticsearch.cluster.settings.ClusterDynamicSettingsModule;
+import org.elasticsearch.common.collect.Lists;
+import org.elasticsearch.common.inject.Module;
 import org.elasticsearch.plugins.AbstractPlugin;
-import org.elasticsearch.rest.RestModule;
-import org.xbib.elasticsearch.action.RestExportAction;
-import org.xbib.elasticsearch.action.RestImportAction;
+import org.xbib.elasticsearch.action.RestHandlerModule;
 
 public class KnapsackPlugin extends AbstractPlugin {
 
@@ -34,11 +36,13 @@ public class KnapsackPlugin extends AbstractPlugin {
     @Override
     public String description() {
         return "Knapsack plugin";
-    }  
-  
-    public void onModule(RestModule module) {
-        module.addRestAction(RestExportAction.class);
-        module.addRestAction(RestImportAction.class);
+    }
+
+    @Override
+    public Collection<Class<? extends Module>> modules() {
+        Collection<Class<? extends Module>> modules = Lists.newArrayList();
+        modules.add(RestHandlerModule.class);
+        return modules;
     }
 
     public void onModule(ClusterDynamicSettingsModule module) {

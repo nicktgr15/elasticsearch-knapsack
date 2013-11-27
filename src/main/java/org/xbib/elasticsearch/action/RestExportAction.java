@@ -1,9 +1,18 @@
-
 package org.xbib.elasticsearch.action;
+
+import static org.elasticsearch.common.collect.Maps.newHashMap;
+import static org.elasticsearch.common.xcontent.ToXContent.EMPTY_PARAMS;
+import static org.elasticsearch.common.xcontent.XContentFactory.jsonBuilder;
+import static org.elasticsearch.rest.RestRequest.Method.GET;
+import static org.elasticsearch.rest.RestRequest.Method.POST;
+import static org.elasticsearch.rest.RestStatus.OK;
+import static org.elasticsearch.rest.action.support.RestXContentBuilder.restContentBuilder;
 
 import java.io.IOException;
 import java.net.URI;
+import java.util.Iterator;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Set;
 
 import org.elasticsearch.action.admin.cluster.health.ClusterHealthResponse;
@@ -29,12 +38,13 @@ import org.elasticsearch.rest.RestChannel;
 import org.elasticsearch.rest.RestController;
 import org.elasticsearch.rest.RestHandler;
 import org.elasticsearch.rest.RestRequest;
+import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.rest.XContentRestResponse;
 import org.elasticsearch.rest.XContentThrowableRestResponse;
 import org.elasticsearch.search.SearchHit;
-
 import org.xbib.elasticsearch.knapsack.KnapsackService;
 import org.xbib.elasticsearch.knapsack.KnapsackStatus;
+import org.xbib.elasticsearch.s3.S3;
 import org.xbib.io.Connection;
 import org.xbib.io.ConnectionFactory;
 import org.xbib.io.ConnectionService;
@@ -42,32 +52,26 @@ import org.xbib.io.Packet;
 import org.xbib.io.Session;
 import org.xbib.io.StreamCodecService;
 
-import static org.elasticsearch.common.collect.Maps.newHashMap;
-import static org.elasticsearch.common.xcontent.ToXContent.EMPTY_PARAMS;
-import static org.elasticsearch.common.xcontent.XContentFactory.jsonBuilder;
-import static org.elasticsearch.rest.RestRequest.Method.GET;
-import static org.elasticsearch.rest.RestRequest.Method.POST;
-import static org.elasticsearch.rest.RestStatus.OK;
-import static org.elasticsearch.rest.action.support.RestXContentBuilder.restContentBuilder;
-
-
 public class RestExportAction extends BaseRestHandler {
 
     private final SettingsFilter settingsFilter;
 
     private final KnapsackService knapsackService;
 
+    private final S3 s3;
+
     @Inject
-    public RestExportAction(Settings settings, Client client,
-            RestController controller, SettingsFilter settingsFilter, KnapsackService knapsackService) {
+    public RestExportAction(Settings settings, Client client, RestController controller, SettingsFilter settingsFilter,
+            KnapsackService knapsackService, S3 s3) {
         super(settings, client);
         this.settingsFilter = settingsFilter;
         this.knapsackService = knapsackService;
+        this.s3 = s3;
 
         controller.registerHandler(POST, "/_export", this);
         controller.registerHandler(POST, "/{index}/_export", this);
         controller.registerHandler(POST, "/{index}/{type}/_export", this);
-        controller.registerHandler(GET, "/_export/state",  new RestKnapsackExportStatus());
+        controller.registerHandler(GET, "/_export/state", new RestKnapsackExportStatus());
     }
 
     @Override
@@ -96,6 +100,17 @@ public class RestExportAction extends BaseRestHandler {
                     scheme = "tar" + codec;
                 }
             }
+            
+            String s3Path = request.param("s3path");
+            
+            if (settings.get("s3.bucket_name", null) != null) {
+                if (s3Path == null || target.equals(desc)){
+                    logger.error("specify target and s3path parameters in your request");
+                    channel.sendResponse(new XContentThrowableRestResponse(request, RestStatus.BAD_REQUEST, 
+                            new RuntimeException("specify target and s3path parameters in your request")));
+                }
+            }
+            
             ConnectionService service = ConnectionService.getInstance();
             ConnectionFactory factory = service.getConnectionFactory(scheme);
             final Connection<Session> connection = factory.getConnection(URI.create(scheme + ":" + target));
@@ -103,7 +118,7 @@ public class RestExportAction extends BaseRestHandler {
             session.open(Session.Mode.WRITE);
             channel.sendResponse(new XContentRestResponse(request, OK, builder));
             EsExecutors.daemonThreadFactory(settings, "Knapsack export [" + desc + "]")
-                    .newThread(new ExportThread(request, connection, session, target)).start();
+                    .newThread(new ExportThread(request, connection, session, target, s3Path)).start();
         } catch (Exception ex) {
             try {
                 logger.error(ex.getMessage(), ex);
@@ -128,15 +143,18 @@ public class RestExportAction extends BaseRestHandler {
 
         private final String[] types;
 
-        public ExportThread(RestRequest request, Connection<Session> connection,
-                            Session session, String target) {
+        private final String s3Path;
+
+        public ExportThread(RestRequest request, Connection<Session> connection, Session session, String target,
+                String s3Path) {
             this.request = request;
             this.connection = connection;
             this.session = session;
             this.target = target;
             this.indices = Strings.splitStringByCommaToArray(request.param("index", "_all"));
-            this.types = request.param("type") != null ?
-                    Strings.splitStringByCommaToArray(request.param("type")) : null;
+            this.s3Path = s3Path;
+            this.types = request.param("type") != null ? Strings.splitStringByCommaToArray(request.param("type"))
+                    : null;
         }
 
         @Override
@@ -152,17 +170,16 @@ public class RestExportAction extends BaseRestHandler {
                     Map<String, String> settings = getSettings(s);
                     for (String index : settings.keySet()) {
                         session.write(new ElasticPacket(index, "_settings", null, settings.get(index)));
-                        Map<String, String> mappings = getMapping(index, types != null ? ImmutableSet.copyOf(types) : null);
+                        Map<String, String> mappings = getMapping(index, types != null ? ImmutableSet.copyOf(types)
+                                : null);
                         for (String type : mappings.keySet()) {
                             session.write(new ElasticPacket(index, type, "_mapping", mappings.get(type)));
                         }
                     }
                 }
                 // export document _source fields
-                SearchRequestBuilder searchRequest = client.prepareSearch()
-                        .setSize(size)
-                        .setSearchType(SearchType.SCAN)
-                        .setScroll(TimeValue.timeValueMillis(millis));
+                SearchRequestBuilder searchRequest = client.prepareSearch().setSize(size)
+                        .setSearchType(SearchType.SCAN).setScroll(TimeValue.timeValueMillis(millis));
                 if (indices != null && !"_all".equals(indices[0])) {
                     searchRequest.setIndices(indices);
                 }
@@ -172,19 +189,22 @@ public class RestExportAction extends BaseRestHandler {
                 SearchResponse searchResponse = searchRequest.execute().actionGet();
                 while (searchResponse.getScrollId() != null) {
                     searchResponse = client.prepareSearchScroll(searchResponse.getScrollId())
-                            .setScroll(TimeValue.timeValueMillis(millis))
-                            .execute().actionGet();
+                            .setScroll(TimeValue.timeValueMillis(millis)).execute().actionGet();
                     if (searchResponse.getHits().getHits().length == 0) {
                         break;
                     }
                     for (SearchHit hit : searchResponse.getHits()) {
-                        ElasticPacket packet = new ElasticPacket(hit.getIndex(), hit.getType(), hit.getId(), hit.getSourceAsString());
+                        ElasticPacket packet = new ElasticPacket(hit.getIndex(), hit.getType(), hit.getId(),
+                                hit.getSourceAsString());
                         session.write(packet);
                     }
                 }
                 session.close();
                 connection.close();
                 logger.info("export to {} completed", target);
+                s3.writeToS3(target, s3Path);
+                logger.info("transfer to S3 for {} completed", target);
+
             } catch (Exception e) {
                 logger.error(e.getMessage(), e);
             } finally {
@@ -200,8 +220,7 @@ public class RestExportAction extends BaseRestHandler {
     private Map<String, String> getSettings(String index) throws IOException {
         logger.info("getting settings for index {}", index);
         Map<String, String> settings = newHashMap();
-        ClusterStateRequestBuilder request = client.admin().cluster().prepareState()
-                .setFilterRoutingTable(true)
+        ClusterStateRequestBuilder request = client.admin().cluster().prepareState().setFilterRoutingTable(true)
                 .setFilterNodes(true);
         if (!"_all".equals(index)) {
             request.setFilterIndices(index);
@@ -212,8 +231,8 @@ public class RestExportAction extends BaseRestHandler {
             for (IndexMetaData indexMetaData : metaData) {
                 final XContentBuilder builder = jsonBuilder();
                 builder.startObject();
-                for (Map.Entry<String, String> entry :
-                        settingsFilter.filterSettings(indexMetaData.getSettings()).getAsMap().entrySet()) {
+                for (Map.Entry<String, String> entry : settingsFilter.filterSettings(indexMetaData.getSettings())
+                        .getAsMap().entrySet()) {
                     builder.field(entry.getKey(), entry.getValue());
                 }
                 builder.endObject();
@@ -226,11 +245,8 @@ public class RestExportAction extends BaseRestHandler {
     private Map<String, String> getMapping(String index, Set<String> types) throws IOException {
         logger.info("getting mapping for index {} and types {}", index, types);
         Map<String, String> mappings = newHashMap();
-        ClusterStateResponse response = client.admin().cluster().prepareState()
-                .setFilterRoutingTable(true)
-                .setFilterNodes(true)
-                .setFilterIndices(index)
-                .execute().actionGet();
+        ClusterStateResponse response = client.admin().cluster().prepareState().setFilterRoutingTable(true)
+                .setFilterNodes(true).setFilterIndices(index).execute().actionGet();
         MetaData metaData = response.getState().getMetaData();
         if (!metaData.getIndices().isEmpty()) {
             IndexMetaData indexMetaData = metaData.iterator().next();
@@ -280,14 +296,11 @@ public class RestExportAction extends BaseRestHandler {
         public void handleRequest(RestRequest request, RestChannel channel) {
             try {
                 XContentBuilder builder = restContentBuilder(request);
-                builder.startObject()
-                        .field("exports")
-                        .startArray();
+                builder.startObject().field("exports").startArray();
                 for (KnapsackStatus export : knapsackService.getExports()) {
                     export.toXContent(builder, EMPTY_PARAMS);
                 }
-                builder.endArray()
-                        .endObject();
+                builder.endArray().endObject();
                 channel.sendResponse(new XContentRestResponse(request, OK, builder));
             } catch (IOException ioe) {
                 try {

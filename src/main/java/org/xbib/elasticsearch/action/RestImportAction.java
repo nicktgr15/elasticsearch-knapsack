@@ -1,6 +1,16 @@
 
 package org.xbib.elasticsearch.action;
 
+import static org.elasticsearch.client.Requests.createIndexRequest;
+import static org.elasticsearch.client.Requests.putMappingRequest;
+import static org.elasticsearch.common.collect.Maps.newHashMap;
+import static org.elasticsearch.common.collect.Sets.newHashSet;
+import static org.elasticsearch.common.xcontent.ToXContent.EMPTY_PARAMS;
+import static org.elasticsearch.rest.RestRequest.Method.GET;
+import static org.elasticsearch.rest.RestRequest.Method.POST;
+import static org.elasticsearch.rest.RestStatus.OK;
+import static org.elasticsearch.rest.action.support.RestXContentBuilder.restContentBuilder;
+
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -24,11 +34,12 @@ import org.elasticsearch.rest.RestChannel;
 import org.elasticsearch.rest.RestController;
 import org.elasticsearch.rest.RestHandler;
 import org.elasticsearch.rest.RestRequest;
+import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.rest.XContentRestResponse;
 import org.elasticsearch.rest.XContentThrowableRestResponse;
-
 import org.xbib.elasticsearch.knapsack.KnapsackService;
 import org.xbib.elasticsearch.knapsack.KnapsackStatus;
+import org.xbib.elasticsearch.s3.S3;
 import org.xbib.io.BulkOperation;
 import org.xbib.io.Connection;
 import org.xbib.io.ConnectionFactory;
@@ -37,26 +48,18 @@ import org.xbib.io.Packet;
 import org.xbib.io.Session;
 import org.xbib.io.StreamCodecService;
 
-import static org.elasticsearch.client.Requests.createIndexRequest;
-import static org.elasticsearch.client.Requests.putMappingRequest;
-import static org.elasticsearch.common.collect.Maps.newHashMap;
-import static org.elasticsearch.common.collect.Sets.newHashSet;
-import static org.elasticsearch.common.unit.TimeValue.timeValueSeconds;
-import static org.elasticsearch.common.xcontent.ToXContent.EMPTY_PARAMS;
-import static org.elasticsearch.rest.RestRequest.Method.GET;
-import static org.elasticsearch.rest.RestRequest.Method.POST;
-import static org.elasticsearch.rest.RestStatus.OK;
-import static org.elasticsearch.rest.action.support.RestXContentBuilder.restContentBuilder;
-
 public class RestImportAction extends BaseRestHandler {
 
     private final KnapsackService knapsackService;
+    
+    private final S3 s3;
 
     @Inject
     public RestImportAction(Settings settings, Client client,
-            RestController controller, KnapsackService knapsackService) {
+            RestController controller, KnapsackService knapsackService, S3 s3) {
         super(settings, client);
         this.knapsackService = knapsackService;
+        this.s3 = s3;
 
         controller.registerHandler(POST, "/_import", this);
         controller.registerHandler(POST, "/{index}/_import", this);
@@ -90,7 +93,19 @@ public class RestImportAction extends BaseRestHandler {
                     scheme = "tar" + codec;
                 }
             }
-
+            
+            String s3Path = request.param("s3path");
+            
+            if (settings.get("s3.bucket_name", null) != null) {
+                if (s3Path == null || target.equals(desc)){
+                    logger.error("specify target and s3path parameters in your request");
+                    channel.sendResponse(new XContentThrowableRestResponse(request, RestStatus.BAD_REQUEST, 
+                            new RuntimeException("specify target and s3path parameters in your request")));
+                }
+            }
+            
+            s3.readFromS3(target, s3Path);
+            
             ConnectionService service = ConnectionService.getInstance();
             ConnectionFactory factory = service.getConnectionFactory(scheme);
             final Connection<Session> connection = factory.getConnection(URI.create(scheme + ":" + target));
